@@ -12,7 +12,10 @@ namespace MemoryReuseDictionary.cs
     {
         static void Main(string[] args)
         {
-            var dict = new Dictionary<int, int>();//<int, int>();
+            int xx = -1;
+            int yy = xx << 1;
+
+            var dict = new MemoryReuseDictionary<int, int>();//<int, int>();
             for (int i = 0; i < 10000000; ++i)
             {
                 dict.Add(i, i + 1);
@@ -27,6 +30,20 @@ namespace MemoryReuseDictionary.cs
 
             // dict.Remove(456);
             // dict.TrimExcess();
+        }
+
+
+        const uint PRIME32_2 = 2246822519U;
+        const uint PRIME32_3 = 3266489917U;
+
+        private static uint rotate(uint v)
+        {
+            v ^= v >> 15;
+            v *= PRIME32_2;
+            v ^= v >> 13;
+            v *= PRIME32_3;
+            v ^= v >> 16;
+            return v;
         }
     }
 }

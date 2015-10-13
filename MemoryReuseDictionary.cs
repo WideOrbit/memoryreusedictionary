@@ -6,27 +6,59 @@ namespace MemoryReuseDictionary
 {
     class MemoryReuseDictionary<TKey, TValue> : IDictionary<TKey, TValue>
     {
-        private class Elem
+        private struct Elem
         {
             public TKey Key;
             public TValue Value;
-            public Elem Next;
-            public bool Used;
+            private int _next;
+
+            public int Next
+            {
+                get { return _next >> 1; }
+                set { _next = value << 1 | (_next & 1); }
+            }
+
+            public bool Used
+            {
+                get { return (_next & 1) != 0; }
+                set
+                {
+                    if (value)
+                    {
+                        _next |= 1;
+                    }
+                    else
+                    {
+                        _next &= ~1;
+                    }
+                }
+            }
+
+            public void Recycle(int next)
+            {
+                Key = default(TKey);
+                Value = default(TValue);
+                Next = next;
+            }
         };
 
         private Elem[][] _elems;
 
+        private int[][] _roots;
+
         private int _size;
 
-        private int _usedCapacity;
+        private int _freeElemIndex;
 
-        private int _slots; // 'max' size before rebuild
+        private int _numElems; // 'max' size before rebuild
+
+        private int _freeElemRoot;
 
         private int _outerMask = 0;
 
         // use 4096 max values
 
-        private int _shr = 0;
+        private const int _shr = 12;
 
         private int _innerMask = 0;
 
@@ -42,195 +74,204 @@ namespace MemoryReuseDictionary
             return v;
         }
 
-        const uint PRIME32_2 = 2246822519U;
-        const uint PRIME32_3 = 3266489917U;
-
-        private static uint rotate(uint v)
+        private enum SetFlag
         {
-            v ^= v >> 15;
-            v *= PRIME32_2;
-            v ^= v >> 13;
-            v *= PRIME32_3;
-            v ^= v >> 16;
-            return v;
-        }
+            Add,
+            Set,
+            AddNew
+        };
 
-        private void Set(TKey key, TValue value, bool add)
+        private void Set(TKey key, TValue value, SetFlag flag, bool used)
         {
             var hash = key.GetHashCode();
-            var e = Get(key, hash);
-            if (e != null)
+            int index = 0;
+            if (flag != SetFlag.AddNew)
             {
-                if (e.Used && add)
+                index = _roots[(hash >> _shr) & _outerMask][hash & _innerMask];
+                while (index != -1)
                 {
-                    throw new InvalidOperationException("Key already exists");
+                    var elem = _elems[(index >> _shr) & _outerMask][index & _innerMask];
+                    if (elem.Key.Equals(key))
+                    {
+                        if (elem.Used && flag == SetFlag.Add)
+                        {
+                            throw new InvalidOperationException("Key already exists");
+                        }
+                        else
+                        {
+                            _elems[(index >> _shr) & _outerMask][index & _innerMask].Key = key;
+                        }
+
+                        return;
+                    }
+
+                    index = elem.Next;
                 }
-                e.Value = value;
-                if (e.Used == false) ++_size;
-                e.Used = true;
+            }
+
+            // Create new
+            if (_freeElemIndex != _numElems)
+            {
+                index = _freeElemIndex++;
+            }
+            else if (_freeElemRoot != -1)
+            {
+                index = _freeElemRoot;
+                _freeElemRoot = _elems[(index >> _shr) & _outerMask][index & _innerMask].Next;
             }
             else
             {
-                // insert new
-                if (_usedCapacity >= _slots * 4)
-                {
-                    SetSlots(Math.Max(1, _usedCapacity * 2));
-                }
+                Resize(Math.Max(1, 2 * _numElems));
 
-                var elem = new Elem();
-                elem.Used = true;
-                elem.Key = key;
-                elem.Value = value;
-                UncheckedAdd(elem, hash);
-                ++_size;
+                index = _freeElemIndex++;
             }
-        }
 
-        public void TrimExcess()
-        {
-            if (_elems != null)
+            var newElem = new Elem
             {
-                foreach (var e in _elems)
-                {
-                    for (int i = 0; i < e.Length; ++i)
-                    {
-                        Elem prev = null;
-                        var curr = e[i];
-                        while (curr != null)
-                        {
-                            var next = curr.Next;
-
-                            if (!curr.Used)
-                            {
-                                if (prev == null)
-                                {
-                                    e[i] = next;
-                                }
-                                else
-                                {
-                                    prev.Next = next;
-                                }
-                                --_usedCapacity;
-                            }
-
-                            prev = curr;
-                            curr = next;
-                        }
-                    }
-                }
-            }
+                Key = key,
+                Value = value,
+                Next = _roots[(hash >> _shr) & _outerMask][hash & _innerMask],
+                Used = used
+            };
+            _elems[(index >> _shr) & _outerMask][index & _innerMask] = newElem;
+            _roots[(hash >> _shr) & _outerMask][hash & _innerMask] = index;
         }
 
-        private void SetSlots(int newSlots)
+        public MemoryReuseDictionary()
+            : this(1)
         {
-            var dict = new MemoryReuseDictionary<TKey, TValue>();
-            newSlots = upper_power_of_two(newSlots);
+
+        }
+
+        private MemoryReuseDictionary(int numElems)
+        {
+            _numElems = numElems = upper_power_of_two(numElems);
             int innerSize = 0;
-            if (newSlots > 4096)
+            if (numElems > 4096)
             {
-                dict._elems = new Elem[newSlots >> 12][];
+                _elems = new Elem[numElems >> 12][];
+                _roots = new int[numElems >> 12][];
                 innerSize = 4096;
             }
             else
             {
-                dict._elems = new Elem[1][];
-                innerSize = newSlots;
+                _elems = new Elem[1][];
+                _roots = new int[1][];
+                innerSize = numElems;
             }
 
-            dict._innerMask = innerSize - 1;
-            dict._outerMask = Math.Max(0, (newSlots - 1) >> 12);
+            _innerMask = innerSize - 1;
+            _outerMask = Math.Max(0, (numElems - 1) >> 12);
 
-            for (int i = 0; i < dict._elems.Length; ++i)
+            for (int i = 0; i < _elems.Length; ++i)
             {
-                dict._elems[i] = new Elem[innerSize];
-            }
-            dict._slots = newSlots;
-
-            while (innerSize > 0)
-            {
-                ++dict._shr;
-                innerSize = innerSize >> 1;
-            }
-
-            if (_elems != null)
-            {
-                foreach (var e in _elems)
+                _elems[i] = new Elem[innerSize];
+                var t = _roots[i] = new int[innerSize];
+                for (int j = 0; j < innerSize; ++j)
                 {
-                    for (int i = 0; i < e.Length; ++i)
+                    t[j] = -1;
+                }
+            }
+
+            _freeElemIndex = 0;
+            _freeElemRoot = -1;
+        }
+
+        private void Resize(int numElems)
+        {
+            var newDict = new MemoryReuseDictionary<TKey, TValue>(numElems);
+
+            var i = GetElemEnumerator();
+            while (i.MoveNext())
+            {
+                var e = i.Current;
+                newDict.Set(e.Key, e.Value, SetFlag.AddNew, e.Used);
+            }
+
+            _elems = newDict._elems;
+            _roots = newDict._roots;
+            _innerMask = newDict._innerMask;
+            _outerMask = newDict._outerMask;
+            //_shr = newDict._shr;
+            _size = newDict._size;
+            _freeElemIndex = newDict._freeElemIndex;
+            _freeElemRoot = newDict._freeElemRoot;
+            _numElems = newDict._numElems;
+        }
+
+        private bool TryGetElem(TKey key, out Elem outElem)
+        {
+            var hash = key.GetHashCode();
+            var index = _roots[(hash >> _shr) & _outerMask][hash & _innerMask];
+            while (index != -1)
+            {
+                var elem = _elems[(index >> _shr) & _outerMask][index & _innerMask];
+                if (elem.Key.Equals(key))
+                {
+                    outElem = elem;
+                    return true;
+                }
+                index = elem.Next;
+            }
+
+            outElem = default(Elem);
+            return false;
+        }
+
+        public void TrimExcess()
+        {
+            if (_roots != null)
+            {
+                foreach (var root in _roots)
+                {
+                    for (int i = 0; i < root.Length; ++i)
                     {
-                        while (true)
+                        var index = root[i];
+                        var prev = -1;
+                        while (index != 1)
                         {
-                            var x = e[i];
-                            if (x == null) break;
-                            e[i] = x.Next;
-                            x.Next = null;
-                            dict.UncheckedAdd(x);
+                            var elem = _elems[(index >> _shr) & _outerMask][index & _innerMask];
+                            var next = elem.Next;
+                            if (!elem.Used)
+                            {
+                                if (prev != -1)
+                                {
+                                    _elems[(prev >> _shr) & _outerMask][prev & _innerMask].Next = next;
+                                }
+                                else
+                                {
+                                    root[i] = next;
+                                }
+
+                                _elems[(index >> _shr) & _outerMask][index & _innerMask].Recycle(_freeElemRoot);
+                                _freeElemRoot = index;
+                            }
+
+                            prev = index;
+                            index = next;
                         }
                     }
                 }
             }
-
-            _elems = dict._elems;
-            _innerMask = dict._innerMask;
-            _outerMask = dict._outerMask;
-            _size = dict._size;
-            _slots = dict._slots;
-            _shr = dict._shr;
-            _usedCapacity = dict._usedCapacity;
         }
-
-        private Elem Get(TKey key)
-        {
-            return Get(key, key.GetHashCode());
-        }
-
-        private Elem Get(TKey key, int hash)
-        {
-            if (_elems != null)
-            {
-                var high = hash >> _shr;
-                var e = _elems[high & _outerMask];
-                var first = e[hash & _innerMask];
-                while (first != null && !first.Key.Equals(key))
-                {
-                    first = first.Next;
-                }
-                return first;
-            }
-
-            return null;
-        }
-
 
         public void Add(TKey key, TValue value)
         {
-            Set(key, value, true);
-        }
-
-        private void UncheckedAdd(Elem x)
-        {
-            UncheckedAdd(x, x.Key.GetHashCode());
-        }
-
-        private void UncheckedAdd(Elem x, int hash)
-        {
-            var high = hash >> _shr;
-            var e = _elems[high & _outerMask];
-            x.Next = e[hash & _innerMask];
-            e[hash & _innerMask] = x;
-            ++_usedCapacity;
+            Set(key, value, SetFlag.Add, true);
         }
 
         public bool ContainsKey(TKey key)
         {
-            var e = Get(key);
-            return e != null && e.Used;
+            Elem e;
+
+            return (TryGetElem(key, out e) && e.Used);
         }
 
         public bool ContainsOldKey(TKey key)
         {
-            var e = Get(key);
-            return e != null && !e.Used;
+            Elem e;
+
+            return (TryGetElem(key, out e) && !e.Used);
         }
 
         public ICollection<TKey> Keys
@@ -240,45 +281,49 @@ namespace MemoryReuseDictionary
 
         public bool Remove(TKey key)
         {
-            var e = Get(key);
-            if (e != null && e.Used)
+            var hash = key.GetHashCode();
+            var index = _roots[(hash >> _shr) & _outerMask][hash & _innerMask];
+            while (index != 0)
             {
-                e.Used = false;
-                --_size;
-                return true;
+                --index;
+                var elem = _elems[(index >> _shr) & _outerMask][index & _innerMask];
+                if (elem.Key.Equals(key))
+                {
+                    var rv = _elems[(index >> _shr) & _outerMask][index & _innerMask].Used;
+                    _elems[(index >> _shr) & _outerMask][index & _innerMask].Used = false;
+                    return rv;
+                }
             }
+
             return false;
         }
 
         public bool TryGetValue(TKey key, out TValue value)
         {
-            var e = Get(key);
-            if (e != null && e.Used)
+            Elem e;
+
+            if (TryGetElem(key, out e) && e.Used)
             {
                 value = e.Value;
                 return true;
             }
-            else
-            {
-                value = default(TValue);
-                return false;
-            }
+            value = default(TValue);
+            return false;
         }
 
         public bool TryGetOldValue(TKey key, out TValue value)
         {
-            var e = Get(key);
-            if (e != null && !e.Used)
+            Elem e;
+
+            if (TryGetElem(key, out e) && !e.Used)
             {
                 value = e.Value;
                 return true;
             }
-            else
-            {
-                value = default(TValue);
-                return false;
-            }
+            value = default(TValue);
+            return false;
         }
+
         public ICollection<TValue> Values
         {
             get { return new ValuesCollection(this); }
@@ -288,8 +333,9 @@ namespace MemoryReuseDictionary
         {
             get
             {
-                var e = Get(key);
-                if (e != null && e.Used)
+                Elem e;
+
+                if (TryGetElem(key, out e) && e.Used)
                 {
                     return e.Value;
                 }
@@ -297,7 +343,7 @@ namespace MemoryReuseDictionary
             }
             set
             {
-                Set(key, value, false);
+                Set(key, value, SetFlag.Set, true);
             }
         }
 
@@ -308,18 +354,21 @@ namespace MemoryReuseDictionary
 
         public void Clear()
         {
-            var e = GetElemEnumerator();
-            while (e.MoveNext())
+            foreach (var e in _elems)
             {
-                e.Current.Used = false;
+                for (int i = 0; i < e.Length; ++i)
+                {
+                    e[i].Used = false;
+                }
             }
+
             _size = 0;
         }
 
         public bool Contains(KeyValuePair<TKey, TValue> item)
         {
-            var e = Get(item.Key);
-            return e != null && e.Used && e.Value.Equals(item.Value);
+            Elem e;
+            return TryGetElem(item.Key, out e) && e.Used && e.Value.Equals(item.Value);
         }
 
         public void CopyTo(KeyValuePair<TKey, TValue>[] array, int arrayIndex)
@@ -346,7 +395,8 @@ namespace MemoryReuseDictionary
 
         public bool Remove(KeyValuePair<TKey, TValue> item)
         {
-            throw new NotImplementedException();
+            Elem e;
+            return TryGetElem(item.Key, out e) && e.Used && e.Value.Equals(item.Value) && Remove(item.Key);
         }
 
         public IEnumerator<KeyValuePair<TKey, TValue>> GetEnumerator()
@@ -360,14 +410,19 @@ namespace MemoryReuseDictionary
 
         private IEnumerator<Elem> GetElemEnumerator()
         {
-            for (int i = 0; i < _elems.Length; ++i)
+            if (_roots != null)
             {
-                var e = _elems[i];
-                for (int j = 0; j < e.Length; ++j)
+                foreach (var root in _roots)
                 {
-                    for (var l = e[j]; l != null; l = l.Next)
+                    for (int i = 0; i < root.Length; ++i)
                     {
-                        yield return l;
+                        var index = root[i];
+                        while (index != -1)
+                        {
+                            var elem = _elems[(index >> _shr) & _outerMask][index & _innerMask];
+                            yield return elem;
+                            index = elem.Next;
+                        }
                     }
                 }
             }
