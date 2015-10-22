@@ -20,6 +20,7 @@ namespace MemoryReuseDictionary.cs
             {
                 dict.Add(i, i + 1);
             }
+            dict.TrimExcess();
 
 
             Console.WriteLine("Done first");

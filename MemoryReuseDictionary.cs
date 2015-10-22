@@ -46,11 +46,11 @@ namespace MemoryReuseDictionary
 
         private int[][] _roots;
 
-        private int _size;
+        private int _count;
 
         private int _freeElemIndex;
 
-        private int _numElems; // 'max' size before rebuild
+        private int _capacity; // 'max' size before rebuild
 
         private int _freeElemRoot;
 
@@ -80,7 +80,7 @@ namespace MemoryReuseDictionary
 
         private void Set(TKey key, TValue value, SetFlag flag, bool used)
         {
-            var hash = key.GetHashCode() % _numElems;
+            var hash = key.GetHashCode() % _capacity;
             int index = 0;
             if (flag != SetFlag.AddNew)
             {
@@ -96,7 +96,18 @@ namespace MemoryReuseDictionary
                         }
                         else
                         {
-                            _elems[index >> _shr][index & _innerMask].Key = key;
+                            if (used && !elem.Used)
+                            {
+                                _elems[index >> _shr][index & _innerMask].Used = true;
+                                ++_count;
+                            }
+                            else if (!used && elem.Used)
+                            {
+                                _elems[index >> _shr][index & _innerMask].Used = false;
+                                --_count;
+                            }
+
+                            _elems[index >> _shr][index & _innerMask].Value = value;
                         }
 
                         return;
@@ -107,7 +118,7 @@ namespace MemoryReuseDictionary
             }
 
             // Create new
-            if (_freeElemIndex != _numElems)
+            if (_freeElemIndex != _capacity)
             {
                 index = _freeElemIndex++;
             }
@@ -118,8 +129,8 @@ namespace MemoryReuseDictionary
             }
             else
             {
-                var newNumElems = Math.Max(1 + _numElems, (int)(0.5 + _numElems * 1.15));
-                Resize(newNumElems);
+                var newNumElems = Math.Max(1 + _capacity, (int)(0.5 + _capacity * GrowthFactor));
+                SetCapacity(newNumElems);
                 Set(key, value, flag, used);
                 return;
             }
@@ -133,7 +144,16 @@ namespace MemoryReuseDictionary
             };
             _elems[index >> _shr][index & _innerMask] = newElem;
             _roots[hash >> _shr][hash & _innerMask] = index;
+            if (used)
+            {
+                ++_count;
+            }
+
         }
+
+        public double GrowthFactor = 1.33;
+
+        public double ExcessFactor = 1.05;
 
         public MemoryReuseDictionary()
             : this(1)
@@ -141,31 +161,31 @@ namespace MemoryReuseDictionary
 
         }
 
-        private MemoryReuseDictionary(int numElems)
+        private MemoryReuseDictionary(int capacity)
         {
             int innerSize = 0;
-            if (numElems <= 4096)
+            if (capacity <= 4096)
             {
                 _shr = 12;
-                _numElems = numElems;
+                _capacity = capacity;
                 _innerMask = 0x7fffffff;
-                innerSize = numElems;
+                innerSize = capacity;
                 _elems = new Elem[1][];
                 _roots = new int[1][];
             }
             else
             {
-                var t = Base2Log(numElems);
+                var t = Base2Log(capacity);
                 if ((t & 1) != 0) ++t; // make it round
                 t = Math.Min(12, t / 2);
 
                 _shr = t;
                 _innerMask = (1 << t) - 1;
-                _numElems = (1 + numElems >> _shr) << _shr;
+                _capacity = (1 + capacity >> _shr) << _shr;
 
                 innerSize = 1 << _shr;
-                _elems = new Elem[_numElems >> _shr][];
-                _roots = new int[_numElems >> _shr][];
+                _elems = new Elem[_capacity >> _shr][];
+                _roots = new int[_capacity >> _shr][];
             }
 
             for (int i = 0; i < _elems.Length; ++i)
@@ -182,9 +202,9 @@ namespace MemoryReuseDictionary
             _freeElemRoot = -1;
         }
 
-        private void Resize(int numElems)
+        private void SetCapacity(int capacity)
         {
-            var newDict = new MemoryReuseDictionary<TKey, TValue>(numElems);
+            var newDict = new MemoryReuseDictionary<TKey, TValue>(capacity);
 
             var i = GetElemEnumerator();
             while (i.MoveNext())
@@ -197,15 +217,14 @@ namespace MemoryReuseDictionary
             _roots = newDict._roots;
             _innerMask = newDict._innerMask;
             _shr = newDict._shr;
-            _size = newDict._size;
             _freeElemIndex = newDict._freeElemIndex;
             _freeElemRoot = newDict._freeElemRoot;
-            _numElems = newDict._numElems;
+            _capacity = newDict._capacity;
         }
 
         private bool TryGetElem(TKey key, out Elem outElem)
         {
-            var hash = key.GetHashCode() % _numElems;
+            var hash = key.GetHashCode() % _capacity;
             var index = _roots[hash >> _shr][hash & _innerMask];
             while (index != -1)
             {
@@ -259,6 +278,8 @@ namespace MemoryReuseDictionary
             }
 
             // Consider resizing to something smaller?
+            var newNumElems = Math.Min(_capacity, (int)(0.5 + _count * ExcessFactor));
+            SetCapacity(Math.Max(newNumElems, 1));
         }
 
         public void Add(TKey key, TValue value)
@@ -287,7 +308,7 @@ namespace MemoryReuseDictionary
 
         public bool Remove(TKey key)
         {
-            var hash = key.GetHashCode() % _numElems;
+            var hash = key.GetHashCode() % _capacity;
             var index = _roots[hash >> _shr][hash & _innerMask];
             while (index != -1)
             {
@@ -297,6 +318,7 @@ namespace MemoryReuseDictionary
                 {
                     var rv = _elems[index >> _shr][index & _innerMask].Used;
                     _elems[index >> _shr][index & _innerMask].Used = false;
+                    --_count;
                     return rv;
                 }
 
@@ -370,7 +392,7 @@ namespace MemoryReuseDictionary
                 }
             }
 
-            _size = 0;
+            _count = 0;
         }
 
         public bool Contains(KeyValuePair<TKey, TValue> item)
@@ -393,7 +415,7 @@ namespace MemoryReuseDictionary
 
         public int Count
         {
-            get { return _size; }
+            get { return _count; }
         }
 
         public bool IsReadOnly
