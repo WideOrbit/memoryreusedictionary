@@ -54,26 +54,21 @@ namespace MemoryReuseDictionary
 
         private int _freeElemRoot;
 
-        private int _outerMask = 0;
-
         // use 4096 max values
 
-        private int _shr = 12;
-
-        private int _remainder = 0;
+        private int _shr = 0;
 
         private int _innerMask = 0;
 
-        private static int upper_power_of_two(int v)
+        private static int Base2Log(int v)
         {
-            v--;
-            v |= v >> 1;
-            v |= v >> 2;
-            v |= v >> 4;
-            v |= v >> 8;
-            v |= v >> 16;
-            v++;
-            return v;
+            var result = 0;
+            while (v > 0)
+            {
+                ++result;
+                v = v >> 1;
+            }
+            return result;
         }
 
         private enum SetFlag
@@ -85,14 +80,14 @@ namespace MemoryReuseDictionary
 
         private void Set(TKey key, TValue value, SetFlag flag, bool used)
         {
-            var hash = key.GetHashCode() % _remainder;
+            var hash = key.GetHashCode() % _numElems;
             int index = 0;
             if (flag != SetFlag.AddNew)
             {
-                index = _roots[(hash >> _shr) & _outerMask][hash & _innerMask];
+                index = _roots[hash >> _shr][hash & _innerMask];
                 while (index != -1)
                 {
-                    var elem = _elems[(index >> _shr) & _outerMask][index & _innerMask];
+                    var elem = _elems[index >> _shr][index & _innerMask];
                     if (elem.Key.Equals(key))
                     {
                         if (elem.Used && flag == SetFlag.Add)
@@ -101,7 +96,7 @@ namespace MemoryReuseDictionary
                         }
                         else
                         {
-                            _elems[(index >> _shr) & _outerMask][index & _innerMask].Key = key;
+                            _elems[index >> _shr][index & _innerMask].Key = key;
                         }
 
                         return;
@@ -119,24 +114,25 @@ namespace MemoryReuseDictionary
             else if (_freeElemRoot != -1)
             {
                 index = _freeElemRoot;
-                _freeElemRoot = _elems[(index >> _shr) & _outerMask][index & _innerMask].Next;
+                _freeElemRoot = _elems[index >> _shr][index & _innerMask].Next;
             }
             else
             {
-                Resize(Math.Max(1, 2 * _numElems));
-
-                index = _freeElemIndex++;
+                var newNumElems = Math.Max(1 + _numElems, (int)(0.5 + _numElems * 1.15));
+                Resize(newNumElems);
+                Set(key, value, flag, used);
+                return;
             }
 
             var newElem = new Elem
             {
                 Key = key,
                 Value = value,
-                Next = _roots[(hash >> _shr) & _outerMask][hash & _innerMask],
+                Next = _roots[hash >> _shr][hash & _innerMask],
                 Used = used
             };
-            _elems[(index >> _shr) & _outerMask][index & _innerMask] = newElem;
-            _roots[(hash >> _shr) & _outerMask][hash & _innerMask] = index;
+            _elems[index >> _shr][index & _innerMask] = newElem;
+            _roots[hash >> _shr][hash & _innerMask] = index;
         }
 
         public MemoryReuseDictionary()
@@ -147,23 +143,30 @@ namespace MemoryReuseDictionary
 
         private MemoryReuseDictionary(int numElems)
         {
-            _numElems = numElems = upper_power_of_two(numElems);
             int innerSize = 0;
-            if (numElems > 4096)
+            if (numElems <= 4096)
             {
-                _elems = new Elem[numElems >> 12][];
-                _roots = new int[numElems >> 12][];
-                innerSize = 4096;
+                _shr = 12;
+                _numElems = numElems;
+                _innerMask = 0x7fffffff;
+                innerSize = numElems;
+                _elems = new Elem[1][];
+                _roots = new int[1][];
             }
             else
             {
-                _elems = new Elem[1][];
-                _roots = new int[1][];
-                innerSize = numElems;
-            }
+                var t = Base2Log(numElems);
+                if ((t & 1) != 0) ++t; // make it round
+                t = Math.Min(12, t / 2);
 
-            _innerMask = innerSize - 1;
-            _outerMask = Math.Max(0, (numElems - 1) >> 12);
+                _shr = t;
+                _innerMask = (1 << t) - 1;
+                _numElems = (1 + numElems >> _shr) << _shr;
+
+                innerSize = 1 << _shr;
+                _elems = new Elem[_numElems >> _shr][];
+                _roots = new int[_numElems >> _shr][];
+            }
 
             for (int i = 0; i < _elems.Length; ++i)
             {
@@ -177,7 +180,6 @@ namespace MemoryReuseDictionary
 
             _freeElemIndex = 0;
             _freeElemRoot = -1;
-            _shr = 12;
         }
 
         private void Resize(int numElems)
@@ -194,7 +196,6 @@ namespace MemoryReuseDictionary
             _elems = newDict._elems;
             _roots = newDict._roots;
             _innerMask = newDict._innerMask;
-            _outerMask = newDict._outerMask;
             _shr = newDict._shr;
             _size = newDict._size;
             _freeElemIndex = newDict._freeElemIndex;
@@ -204,11 +205,11 @@ namespace MemoryReuseDictionary
 
         private bool TryGetElem(TKey key, out Elem outElem)
         {
-            var hash = key.GetHashCode() % _remainder;
-            var index = _roots[(hash >> _shr) & _outerMask][hash & _innerMask];
+            var hash = key.GetHashCode() % _numElems;
+            var index = _roots[hash >> _shr][hash & _innerMask];
             while (index != -1)
             {
-                var elem = _elems[(index >> _shr) & _outerMask][index & _innerMask];
+                var elem = _elems[index >> _shr][index & _innerMask];
                 if (elem.Key.Equals(key))
                 {
                     outElem = elem;
@@ -233,20 +234,20 @@ namespace MemoryReuseDictionary
                         var prev = -1;
                         while (index != -1)
                         {
-                            var elem = _elems[(index >> _shr) & _outerMask][index & _innerMask];
+                            var elem = _elems[index >> _shr][index & _innerMask];
                             var next = elem.Next;
                             if (!elem.Used)
                             {
                                 if (prev != -1)
                                 {
-                                    _elems[(prev >> _shr) & _outerMask][prev & _innerMask].Next = next;
+                                    _elems[prev >> _shr][prev & _innerMask].Next = next;
                                 }
                                 else
                                 {
                                     root[i] = next;
                                 }
 
-                                _elems[(index >> _shr) & _outerMask][index & _innerMask].Recycle(_freeElemRoot);
+                                _elems[index >> _shr][index & _innerMask].Recycle(_freeElemRoot);
                                 _freeElemRoot = index;
                             }
 
@@ -286,16 +287,16 @@ namespace MemoryReuseDictionary
 
         public bool Remove(TKey key)
         {
-            var hash = key.GetHashCode() % _remainder;
-            var index = _roots[(hash >> _shr) & _outerMask][hash & _innerMask];
+            var hash = key.GetHashCode() % _numElems;
+            var index = _roots[hash >> _shr][hash & _innerMask];
             while (index != -1)
             {
-                var elem = _elems[(index >> _shr) & _outerMask][index & _innerMask];
+                var elem = _elems[index >> _shr][index & _innerMask];
 
                 if (elem.Key.Equals(key))
                 {
-                    var rv = _elems[(index >> _shr) & _outerMask][index & _innerMask].Used;
-                    _elems[(index >> _shr) & _outerMask][index & _innerMask].Used = false;
+                    var rv = _elems[index >> _shr][index & _innerMask].Used;
+                    _elems[index >> _shr][index & _innerMask].Used = false;
                     return rv;
                 }
 
@@ -426,7 +427,7 @@ namespace MemoryReuseDictionary
                         var index = root[i];
                         while (index != -1)
                         {
-                            var elem = _elems[(index >> _shr) & _outerMask][index & _innerMask];
+                            var elem = _elems[index >> _shr][index & _innerMask];
                             yield return elem;
                             index = elem.Next;
                         }
@@ -442,7 +443,7 @@ namespace MemoryReuseDictionary
 
         private class KeysCollection : ICollection<TKey>
         {
-            private MemoryReuseDictionary<TKey, TValue> _dict;
+            private readonly MemoryReuseDictionary<TKey, TValue> _dict;
 
             public KeysCollection(MemoryReuseDictionary<TKey, TValue> dict)
             {
