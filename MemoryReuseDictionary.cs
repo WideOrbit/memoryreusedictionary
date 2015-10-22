@@ -58,7 +58,9 @@ namespace MemoryReuseDictionary
 
         // use 4096 max values
 
-        private const int _shr = 12;
+        private int _shr = 12;
+
+        private int _remainder = 0;
 
         private int _innerMask = 0;
 
@@ -83,7 +85,7 @@ namespace MemoryReuseDictionary
 
         private void Set(TKey key, TValue value, SetFlag flag, bool used)
         {
-            var hash = key.GetHashCode();
+            var hash = key.GetHashCode() % _remainder;
             int index = 0;
             if (flag != SetFlag.AddNew)
             {
@@ -175,6 +177,7 @@ namespace MemoryReuseDictionary
 
             _freeElemIndex = 0;
             _freeElemRoot = -1;
+            _shr = 12;
         }
 
         private void Resize(int numElems)
@@ -192,7 +195,7 @@ namespace MemoryReuseDictionary
             _roots = newDict._roots;
             _innerMask = newDict._innerMask;
             _outerMask = newDict._outerMask;
-            //_shr = newDict._shr;
+            _shr = newDict._shr;
             _size = newDict._size;
             _freeElemIndex = newDict._freeElemIndex;
             _freeElemRoot = newDict._freeElemRoot;
@@ -201,7 +204,7 @@ namespace MemoryReuseDictionary
 
         private bool TryGetElem(TKey key, out Elem outElem)
         {
-            var hash = key.GetHashCode();
+            var hash = key.GetHashCode() % _remainder;
             var index = _roots[(hash >> _shr) & _outerMask][hash & _innerMask];
             while (index != -1)
             {
@@ -228,7 +231,7 @@ namespace MemoryReuseDictionary
                     {
                         var index = root[i];
                         var prev = -1;
-                        while (index != 1)
+                        while (index != -1)
                         {
                             var elem = _elems[(index >> _shr) & _outerMask][index & _innerMask];
                             var next = elem.Next;
@@ -253,6 +256,8 @@ namespace MemoryReuseDictionary
                     }
                 }
             }
+
+            // Consider resizing to something smaller?
         }
 
         public void Add(TKey key, TValue value)
@@ -281,18 +286,20 @@ namespace MemoryReuseDictionary
 
         public bool Remove(TKey key)
         {
-            var hash = key.GetHashCode();
+            var hash = key.GetHashCode() % _remainder;
             var index = _roots[(hash >> _shr) & _outerMask][hash & _innerMask];
-            while (index != 0)
+            while (index != -1)
             {
-                --index;
                 var elem = _elems[(index >> _shr) & _outerMask][index & _innerMask];
+
                 if (elem.Key.Equals(key))
                 {
                     var rv = _elems[(index >> _shr) & _outerMask][index & _innerMask].Used;
                     _elems[(index >> _shr) & _outerMask][index & _innerMask].Used = false;
                     return rv;
                 }
+
+                index = elem.Next;
             }
 
             return false;
